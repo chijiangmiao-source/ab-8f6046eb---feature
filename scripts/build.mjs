@@ -20,7 +20,7 @@ async function main() {
   await mkdir(dist, { recursive: true });
   await cp(path.join(root, 'public'), dist, { recursive: true });
 
-  for (const f of ['app.js']) {
+  for (const f of ['app.js', 'diff.js', 'collect.js']) {
     await syntaxCheck(path.join(dist, f));
   }
   for (const f of ['engine.mjs', 'drill.mjs', 'server.mjs']) {
@@ -30,7 +30,7 @@ async function main() {
   // 产物清单与构建时间，供 verify 与排障使用
   const manifest = {
     builtAt: new Date().toISOString(),
-    files: ['index.html', 'app.js', 'app.css'],
+    files: ['index.html', 'app.js', 'diff.js', 'collect.js', 'app.css'],
   };
   await writeFile(path.join(dist, 'build-manifest.json'), JSON.stringify(manifest, null, 2));
 

@@ -115,7 +115,7 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    if (req.method === 'GET' && /^\/(app\.js|app\.css)$/.test(pathname)) {
+    if (req.method === 'GET' && /^\/(app\.js|diff\.js|collect\.js|app\.css)$/.test(pathname)) {
       const ext = path.extname(pathname);
       const file = await readFile(path.join(PUBLIC_DIR, pathname.slice(1)), 'utf8');
       res.writeHead(200, { 'Content-Type': MIME[ext] });

@@ -12,6 +12,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
+import { collectDiff, makeApi } from '../public/collect.js';
 
 const EXTERNAL_BASE = process.env.BASE_URL || '';
 let child = null;
@@ -127,6 +128,10 @@ async function main() {
     assert(html.includes('/app.js') && html.includes('/app.css'), '页面引用 app.js / app.css');
     const js = await fetch(`${base}/app.js`);
     assert(js.status === 200 && (await js.text()).includes('renderReplica'), 'GET /app.js 返回前端脚本');
+    const diffJs = await fetch(`${base}/diff.js`);
+    assert(diffJs.status === 200 && (await diffJs.text()).includes('buildTimeline'), 'GET /diff.js 返回差异计算模块');
+    const collectJs = await fetch(`${base}/collect.js`);
+    assert(collectJs.status === 200 && (await collectJs.text()).includes('collectDiff'), 'GET /collect.js 返回采集编排模块');
   }
 
   // 3) API 端到端
@@ -161,6 +166,58 @@ async function main() {
     }
     assert(state.replicas.R1.rejected.some((r) => r.reason === 'SEQ_OUT_OF_RANGE'), 'R1 定位到越界首拒因');
     // 重复投递未新增：可见始终只有 p,x,y,c
+  }
+
+  // 3.5) 双副本差异时间轴采集（复用 reset / 逐步回放，结束后恢复原步骤与内容）
+  let diffId;
+  {
+    const res = await fetch(`${base}/api/drills`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sheet: JSON.stringify(SHEET) }),
+    });
+    diffId = (await res.json()).id;
+    await fetch(`${base}/api/drills/${diffId}/play`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ steps: 'all' }),
+    });
+    const before = await (await fetch(`${base}/api/drills/${diffId}`)).json();
+
+    const { timeline, restoredTick } = await collectDiff({
+      drillId: diffId, idA: 'R1', idB: 'R2',
+      fromTick: 1, toTick: before.length,
+      api: makeApi(fetch, base),
+    });
+
+    assert(restoredTick === before.length, `采集后演练恢复到原第 ${before.length} 步`);
+
+    // 相反投递顺序：x/y 第 2 步首次分歧、第 3 步收敛，且非持续分歧
+    const x = timeline.entries.find((e) => e.opId === 'x');
+    const y = timeline.entries.find((e) => e.opId === 'y');
+    assert(x && x.firstTick === 2 && x.resolvedTick === 3 && !x.persistent,
+      'x：第 2 步首次分歧、第 3 步收敛（投递顺序不同不算持续分歧）');
+    assert(y && y.firstTick === 2 && y.resolvedTick === 3 && !y.persistent,
+      'y：第 2 步首次分歧、第 3 步收敛');
+    assert(timeline.ticks[2].same && timeline.ticks[2].convergedHere, '时间轴第 3 步标记为收敛点');
+
+    // g 墓碑分歧（R1 先撤销）在 R2 也撤销后收敛
+    const g = timeline.entries.find((e) => e.opId === 'g');
+    assert(g && g.category === 'tomb' && g.firstTick === 5 && g.resolvedTick === 6,
+      '墓碑 g：第 5 步分歧、第 6 步随 R2 撤销重新一致');
+
+    // 两侧各自的篡改拒因是窗口内持续分歧，且归因到对应副本的投递动作
+    const tx = timeline.entries.find((e) => e.opId.startsWith('x#tampered#'));
+    const ty = timeline.entries.find((e) => e.opId.startsWith('y#tampered#'));
+    assert(tx && tx.persistent && tx.causes.a.length === 1 && tx.causes.b.length === 0,
+      'R1 的篡改拒因归因为 R1 投递动作且窗口内不收敛');
+    assert(ty && ty.persistent && ty.causes.b.length === 1 && ty.causes.a.length === 0,
+      'R2 的篡改拒因归因为 R2 投递动作');
+
+    // 采集结束后投影与采集前逐字节一致（读取到的是恢复后的权威状态）
+    const after = await (await fetch(`${base}/api/drills/${diffId}`)).json();
+    assert(after.tick === before.tick, '恢复后 tick 与采集前一致');
+    assert(JSON.stringify(after.replicas) === JSON.stringify(before.replicas),
+      '恢复后两侧投影与采集前完全一致');
   }
 
   // 4) 重启恢复 + 补投滞留合法操作

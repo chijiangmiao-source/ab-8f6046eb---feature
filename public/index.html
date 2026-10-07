@@ -31,7 +31,29 @@
       </div>
       <div id="sheet-error" class="error-box" hidden></div>
 
-      <h2>2. 重开后零散投递</h2>
+      <h2>2. 双副本差异时间轴</h2>
+      <p class="hint">
+        选择两个<b>不同</b>副本与已回放步骤范围（不超过当前 tick，最多 40 步），
+        页面会复用读取 / 重置 / 逐步回放流程依次采集投影，结束后自动恢复当前演练步骤与内容。
+        按稳定操作标识展示可见项、等待项、墓碑、已应用记录与首个拒因的<b>首次分歧</b>，
+        以及后续重新一致的<b>收敛点</b>；投递顺序不同但结果相同不会被误报为持续分歧。
+      </p>
+      <div class="diff-row">
+        <label>副本 A
+          <select id="diff-replica-a"></select>
+        </label>
+        <label>副本 B
+          <select id="diff-replica-b"></select>
+        </label>
+        <label>从 <input id="diff-from" type="number" min="1" max="40" value="1" /></label>
+        <label>到 <input id="diff-to" type="number" min="1" max="40" value="1" /></label>
+        <button id="btn-diff" class="primary" disabled>采集差异时间轴</button>
+        <button id="btn-diff-cancel" disabled>取消</button>
+      </div>
+      <div id="diff-progress" class="diff-progress" hidden></div>
+      <div id="diff-error" class="error-box" hidden></div>
+
+      <h2>3. 重开后零散投递</h2>
       <p class="hint">刷新/关闭重开后，仍可向指定副本继续投递此前滞留的合法操作。</p>
       <div class="deliver-row">
         <select id="extra-replica"></select>
@@ -43,10 +65,18 @@
 
     <section class="panel stage-panel">
       <div class="stage-head">
-        <h2>3. 回放舞台</h2>
+        <h2>4. 回放舞台</h2>
         <div id="stage-meta" class="meta">尚未创建演练</div>
       </div>
       <div id="replicas" class="replicas"></div>
+
+      <div id="diff-view" hidden>
+        <h2>差异时间轴 <span id="diff-view-meta" class="meta"></span></h2>
+        <div id="diff-timeline" class="tick-strip"></div>
+        <div id="diff-detail" class="diff-detail"></div>
+        <h2>分歧项（按首次分歧步排序）</h2>
+        <div id="diff-entries" class="diff-entries"></div>
+      </div>
 
       <h2>操作日志</h2>
       <div class="table-wrap">
@@ -60,6 +90,6 @@
     </section>
   </main>
 
-  <script src="/app.js"></script>
+  <script type="module" src="/app.js"></script>
 </body>
 </html>

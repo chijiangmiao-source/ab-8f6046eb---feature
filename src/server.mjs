@@ -22,6 +22,7 @@ const HOST = process.env.HOST || '0.0.0.0';
 const MIME = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
+  '.mjs': 'text/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
   '.json': 'application/json; charset=utf-8',
   '.svg': 'image/svg+xml',
@@ -115,7 +116,7 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    if (req.method === 'GET' && /^\/(app\.js|app\.css)$/.test(pathname)) {
+    if (req.method === 'GET' && /^\/(app\.js|app\.css|timeline\.mjs)$/.test(pathname)) {
       const ext = path.extname(pathname);
       const file = await readFile(path.join(PUBLIC_DIR, pathname.slice(1)), 'utf8');
       res.writeHead(200, { 'Content-Type': MIME[ext] });

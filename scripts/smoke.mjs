@@ -125,8 +125,12 @@ async function main() {
     const html = await res.text();
     assert(res.status === 200 && html.includes('姿控步骤单演练'), 'GET / 返回页面且标题正确');
     assert(html.includes('/app.js') && html.includes('/app.css'), '页面引用 app.js / app.css');
+    assert(html.includes('副本分歧时间轴'), '页面包含分歧时间轴区块');
     const js = await fetch(`${base}/app.js`);
     assert(js.status === 200 && (await js.text()).includes('renderReplica'), 'GET /app.js 返回前端脚本');
+    const tl = await fetch(`${base}/timeline.mjs`);
+    assert(tl.status === 200 && (await tl.text()).includes('buildTimeline'),
+      'GET /timeline.mjs 返回分歧时间轴计算模块');
   }
 
   // 3) API 端到端
@@ -163,7 +167,69 @@ async function main() {
     // 重复投递未新增：可见始终只有 p,x,y,c
   }
 
-  // 4) 重启恢复 + 补投滞留合法操作
+  // 4) 分歧时间轴采集路径：重置 -> 逐步回放 -> 逐步读取 -> 复原原位
+  {
+    const divSheet = {
+      replicas: ['R1', 'R2'],
+      steps: [
+        { opId: 'p', type: 'insert', parent: null, seq: 0, title: '根' },
+        { opId: 'x', type: 'insert', parent: 'p', seq: 1, title: '通道X' },
+      ],
+      scripts: {
+        R1: ['p', 'x'],
+        R2: ['p', { opId: 'oob', type: 'insert', parent: null, seq: 99, title: '越界' }, 'x'],
+      },
+    };
+    const created = await (await fetch(`${base}/api/drills`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sheet: JSON.stringify(divSheet) }),
+    })).json();
+    const did = created.id;
+    // 先整段回放到第 3 步，作为采集后要复原的“原位”
+    await fetch(`${base}/api/drills/${did}/play`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ steps: 'all' }),
+    });
+    const before = await (await fetch(`${base}/api/drills/${did}`)).json();
+
+    // 页面采集路径：重置后逐步回放并读取投影
+    await fetch(`${base}/api/drills/${did}/reset`, { method: 'POST' });
+    const frames = [];
+    for (let t = 1; t <= 3; t += 1) {
+      await fetch(`${base}/api/drills/${did}/play`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ steps: 1 }),
+      });
+      frames.push(await (await fetch(`${base}/api/drills/${did}`)).json());
+    }
+    const at = (t, rid) => frames[t - 1].replicas[rid];
+    assert(at(2, 'R1').applied.includes('x') && !at(2, 'R2').applied.includes('x'),
+      '第 2 步末 R1 已应用 x、R2 尚未：出现分歧');
+    assert(at(2, 'R2').rejected.some((r) => r.opId === 'oob' && r.reason === 'SEQ_OUT_OF_RANGE')
+      && at(2, 'R1').rejected.length === 0,
+      '第 2 步末仅 R2 定位到越界首拒因');
+    assert(at(3, 'R1').applied.includes('x') && at(3, 'R2').applied.includes('x'),
+      '第 3 步末两副本均已应用 x：重新一致（收敛点）');
+    assert(at(3, 'R2').rejected.some((r) => r.opId === 'oob'),
+      '首拒因分歧持续至范围末（不随 x 收敛而消失）');
+
+    // 复原：重置后回放到原 tick，投影须与原位一致
+    await fetch(`${base}/api/drills/${did}/reset`, { method: 'POST' });
+    await fetch(`${base}/api/drills/${did}/play`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ steps: before.tick }),
+    });
+    const restored = await (await fetch(`${base}/api/drills/${did}`)).json();
+    assert(restored.tick === before.tick
+      && JSON.stringify(restored.replicas) === JSON.stringify(before.replicas),
+      '采集后复原：演练回到原步骤且各副本投影一致');
+  }
+
+  // 5) 重启恢复 + 补投滞留合法操作
   if (!EXTERNAL_BASE) {
     const restartedBase = await restartServer(base);
     {

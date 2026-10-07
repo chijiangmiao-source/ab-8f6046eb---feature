@@ -1,4 +1,13 @@
-/* 副本回放台前端：零依赖原生 JS。 */
+/* 副本回放台前端：零依赖原生 JS（ES 模块）。
+ * 分歧时间轴的纯计算逻辑在 /timeline.mjs，页面与 node:test 共用。 */
+
+import {
+  buildTimeline,
+  checkReplicaPair,
+  checkCollectRange,
+  hasExtraDeliveries,
+  planRestore,
+} from './timeline.mjs';
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -43,6 +52,14 @@ const SAMPLE = {
 let state = null;
 let currentId = localStorage.getItem('drill-id') || null;
 
+// ---- 分歧时间轴的页面状态 ----
+let collecting = false; // 采集/复原进行中（禁用一切会改动演练的按钮）
+let collectGen = 0; // 代际令牌：取消或重选副本后，旧采集的请求结果不得覆盖新选择
+let timeline = null; // 采集结果 { ticks, rows, summary, selection, log }
+let selectedCell = null; // 时间轴中选中的时刻 { row, tick }
+let lastDrillId = null; // 演练切换时清空时间轴与范围默认值
+let rangeAuto = true; // 范围“止”未手工改动时跟随当前 tick
+
 function esc(s) {
   return String(s).replace(/[&<>"]/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]));
 }
@@ -69,17 +86,34 @@ function showError(msg) {
   box.textContent = msg;
 }
 
+function fillSelect(sel, ids, preferred) {
+  const prev = sel.value;
+  sel.innerHTML = ids.map((id) => `<option>${esc(id)}</option>`).join('');
+  if (prev && ids.includes(prev)) sel.value = prev;
+  else if (preferred && ids.includes(preferred)) sel.value = preferred;
+}
+
 function setControls() {
   const active = !!state;
   const ended = state && (state.finished || state.sealed);
-  $('#btn-step').disabled = !active || ended;
-  $('#btn-all').disabled = !active || ended;
-  $('#btn-reset').disabled = !active;
-  $('#btn-seal').disabled = !active || state.sealed;
-  $('#btn-deliver').disabled = !active;
+  $('#btn-step').disabled = !active || ended || collecting;
+  $('#btn-all').disabled = !active || ended || collecting;
+  $('#btn-reset').disabled = !active || collecting;
+  $('#btn-seal').disabled = !active || state.sealed || collecting;
+  $('#btn-deliver').disabled = !active || collecting;
   $('#extra-replica').innerHTML = active
     ? state.replicaIds.map((id) => `<option>${esc(id)}</option>`).join('')
     : '';
+  // 分歧时间轴控件：采集中锁定，避免与自动回放相互干扰
+  const ids = active ? state.replicaIds : [];
+  fillSelect($('#tl-a'), ids, ids[0]);
+  fillSelect($('#tl-b'), ids, ids[1] ?? ids[0]);
+  $('#tl-a').disabled = !active || collecting;
+  $('#tl-b').disabled = !active || collecting;
+  $('#tl-from').disabled = !active || collecting;
+  $('#tl-to').disabled = !active || collecting;
+  $('#btn-tl-collect').disabled = !active || collecting || state.tick < 1;
+  $('#btn-tl-cancel').disabled = !collecting;
 }
 
 function renderMeta() {
@@ -163,6 +197,125 @@ function renderLog() {
     </tr>`).join('');
 }
 
+// ---- 分歧时间轴渲染 ----
+
+const TL_VALUE_TEXT = {
+  visible: ['可见', '不可见'],
+  waiting: ['等待中', '无等待'],
+  tombstone: ['墓碑', '无墓碑'],
+  applied: ['已应用', '未应用'],
+};
+
+function tlValueText(category, v) {
+  if (category === 'rejection') return v ? `${REASON_TEXT[v] || v}（${v}）` : '无拒因';
+  const [yes, no] = TL_VALUE_TEXT[category];
+  return v != null && v !== false ? yes : no;
+}
+
+function tlStatus(msg, kind = '') {
+  const el = $('#tl-status');
+  if (!msg) { el.hidden = true; el.textContent = ''; return; }
+  el.hidden = false;
+  el.className = `tl-status${kind ? ` ${kind}` : ''}`;
+  el.textContent = msg;
+}
+
+function clearTimeline() {
+  timeline = null;
+  selectedCell = null;
+  renderTimeline();
+}
+
+function intervalText(row) {
+  const parts = [];
+  row.intervals.forEach((iv, i) => {
+    parts.push(`分歧 @${iv.from}${iv.to > iv.from ? `~${iv.to}` : ''}`);
+    const conv = row.convergences[i];
+    parts.push(conv != null ? `收敛 @${conv}` : '持续至范围末');
+  });
+  return parts.join(' · ');
+}
+
+function renderTimeline() {
+  const grid = $('#tl-grid');
+  const summaryEl = $('#tl-summary');
+  if (!timeline) {
+    grid.hidden = true;
+    grid.innerHTML = '';
+    summaryEl.textContent = '';
+    renderDetails();
+    return;
+  }
+  const { ticks, rows, summary, selection } = timeline;
+  const selText = `第 ${selection.from}~${selection.to} 步 · ${esc(selection.a)} vs ${esc(selection.b)}`;
+  if (!rows.length) {
+    summaryEl.innerHTML =
+      `${selText}：两副本逐步投影完全一致 ✓` +
+      '<span class="tl-note">（投递顺序不同但结果相同，不记为分歧）</span>';
+    grid.hidden = true;
+    grid.innerHTML = '';
+    renderDetails();
+    return;
+  }
+  summaryEl.innerHTML =
+    `${selText}：<span class="diverged">${summary.rows} 个标识类别出现分歧</span>` +
+    `（共 ${summary.intervals} 段）· 已收敛 ${summary.converged} 段 · ` +
+    `持续至范围末 ${summary.ongoing} 个标识`;
+
+  const head = '<tr><th>稳定标识</th><th>类别</th>' +
+    ticks.map((t) => `<th>${t}</th>`).join('') +
+    '<th>分歧 / 收敛</th></tr>';
+  const body = rows.map((row, ri) => {
+    const cells = row.cells.map((cell) => {
+      const isConv = row.convergences.includes(cell.tick);
+      const cls = cell.divergent ? 'tl-div' : isConv ? 'tl-conv' : '';
+      const mark = cell.divergent ? (cell.tick === row.firstAt ? '◆' : '●') : isConv ? '✓' : '·';
+      const sel = selectedCell && selectedCell.row === ri && selectedCell.tick === cell.tick
+        ? ' tl-sel' : '';
+      const tip = cell.divergent
+        ? `第 ${cell.tick} 步末分歧${cell.tick === row.firstAt ? '（首次分歧）' : ''}`
+        : isConv ? `第 ${cell.tick} 步末重新一致（收敛点）` : `第 ${cell.tick} 步末一致`;
+      return `<td class="tl-cell ${cls}${sel}" data-row="${ri}" data-tick="${cell.tick}" title="${tip}">${mark}</td>`;
+    }).join('');
+    return `<tr><td class="code">${esc(row.id)}</td><td>${row.categoryLabel}</td>${cells}` +
+      `<td class="tl-iv">${intervalText(row)}</td></tr>`;
+  }).join('');
+  grid.innerHTML = `<table class="tl-table"><thead>${head}</thead><tbody>${body}</tbody></table>`;
+  grid.hidden = false;
+  renderDetails();
+}
+
+function renderDetails() {
+  const box = $('#tl-details');
+  if (!timeline || !selectedCell) { box.hidden = true; box.innerHTML = ''; return; }
+  const row = timeline.rows[selectedCell.row];
+  if (!row) { box.hidden = true; box.innerHTML = ''; return; }
+  const cell = row.cells.find((c) => c.tick === selectedCell.tick);
+  if (!cell) { box.hidden = true; box.innerHTML = ''; return; }
+  const { a, b } = timeline.selection;
+  const events = (timeline.log ?? []).filter(
+    (e) => e.tick === cell.tick && (e.replica === a || e.replica === b),
+  );
+  const evHtml = [a, b].map((rid) => {
+    const list = events.filter((e) => e.replica === rid);
+    if (!list.length) return `<div class="tl-ev"><b>${esc(rid)}</b>：本步无投递</div>`;
+    return list.map((e) =>
+      `<div class="tl-ev"><b>${esc(rid)}</b> → ${esc(e.title)}` +
+      `${e.ref ? ` <span class="oid">${esc(e.ref)}</span>` : ''} ${tag(e.status)}` +
+      `${e.reason ? ` <span class="tag-rejected">${esc(REASON_TEXT[e.reason] || e.reason)}</span>` : ''}</div>`,
+    ).join('');
+  }).join('');
+  box.innerHTML =
+    `<div class="section-label">分歧详情 · 标识 <span class="oid">${esc(row.id)}</span>` +
+    ` · ${row.categoryLabel} · 第 ${cell.tick} 步末${cell.divergent ? '（分歧）' : '（一致）'}</div>` +
+    `<div class="tl-sides">` +
+    `<div><b>${esc(a)}</b>：${esc(tlValueText(row.category, cell.a))}</div>` +
+    `<div><b>${esc(b)}</b>：${esc(tlValueText(row.category, cell.b))}</div>` +
+    `</div>` +
+    `<div class="section-label">导致差异的投递动作（第 ${cell.tick} 步）</div>${evHtml}`;
+  box.hidden = false;
+}
+
 function render() {
   if (!state) {
     $('#replicas').innerHTML = '';
@@ -170,6 +323,15 @@ function render() {
     $('#replicas').innerHTML = state.replicaIds
       .map((rid) => renderReplica(rid, state.replicas[rid])).join('');
   }
+  // 切换演练：时间轴与范围默认值随之失效
+  const drillId = state?.id ?? null;
+  if (drillId !== lastDrillId) {
+    lastDrillId = drillId;
+    rangeAuto = true;
+    $('#tl-from').value = 1;
+    clearTimeline();
+  }
+  if (state && rangeAuto) $('#tl-to').value = state.tick;
   renderMeta();
   renderLog();
   setControls();
@@ -185,6 +347,103 @@ async function refresh() {
     currentId = null;
     localStorage.removeItem('drill-id');
     render();
+  }
+}
+
+// ---- 分歧时间轴采集：复用现有 重置 / 逐步回放 / 读取 流程 ----
+
+async function runCollection() {
+  if (collecting) return;
+  // 直接提示类校验（不启动采集）
+  if (!state || !currentId) return tlStatus('演练不存在或尚未加载，请先创建演练', 'err');
+  const a = $('#tl-a').value;
+  const b = $('#tl-b').value;
+  const pairMsg = checkReplicaPair(a, b);
+  if (pairMsg) return tlStatus(pairMsg, 'err');
+  const from = Number($('#tl-from').value);
+  const to = Number($('#tl-to').value);
+  const rangeMsg = checkCollectRange(from, to, state.tick);
+  if (rangeMsg) return tlStatus(rangeMsg, 'err');
+  if (hasExtraDeliveries(state.log)) {
+    return tlStatus('该演练已包含重开后零散投递，采集需重置演练且无法复原这些投递；请先重置或新建演练', 'err');
+  }
+
+  const gen = ++collectGen;
+  collecting = true;
+  clearTimeline();
+  setControls();
+  const saved = { tick: state.tick, sealed: state.sealed, log: state.log };
+  const frames = [];
+  let lastLog = [];
+  let failure = null;
+
+  // 取消或重选后，旧采集在下一个检查点中止，其结果不再写入页面
+  const alive = () => {
+    if (gen !== collectGen) {
+      const err = new Error('已取消');
+      err.cancelled = true;
+      throw err;
+    }
+  };
+  // 采集动作包装：记录失败位置（阶段 + 步骤号）
+  const attempt = async (stage, stepNo, fn) => {
+    try {
+      return await fn();
+    } catch (err) {
+      err.stage = err.stage ?? stage;
+      err.stepNo = err.stepNo ?? stepNo;
+      throw err;
+    }
+  };
+
+  try {
+    await attempt('重置', 0, () => api('POST', `/api/drills/${currentId}/reset`));
+    alive();
+    for (let t = 1; t <= to; t += 1) {
+      tlStatus(`采集中：第 ${t}/${to} 步…`, '');
+      await attempt('回放', t, () => api('POST', `/api/drills/${currentId}/play`, { steps: 1 }));
+      alive();
+      if (t >= from) {
+        const s = await attempt('读取', t, () => api('GET', `/api/drills/${currentId}`));
+        alive();
+        frames.push({ tick: t, a: s.replicas[a], b: s.replicas[b] });
+        lastLog = s.log;
+      }
+    }
+    alive();
+    const result = buildTimeline(frames);
+    timeline = { ...result, selection: { a, b, from, to }, log: lastLog };
+    selectedCell = null;
+    tlStatus(`采集完成：第 ${from}~${to} 步，演练已复原至第 ${saved.tick} 步。`, 'ok');
+  } catch (err) {
+    // 不留下部分时间轴
+    timeline = null;
+    selectedCell = null;
+    if (err.cancelled) {
+      tlStatus('已取消采集，演练已复原。', '');
+    } else {
+      failure = err;
+      const where = err.stage ? `${err.stage}${err.stepNo ? `（第 ${err.stepNo} 步）` : ''}` : '采集';
+      tlStatus(`采集失败于${where}：${err.message}。已尝试复原演练，未保留部分时间轴。`, 'err');
+    }
+  } finally {
+    // 无论成功、失败或取消：复原演练到原步骤与封存状态
+    try {
+      await api('POST', `/api/drills/${currentId}/reset`);
+      for (const act of planRestore(saved.tick, saved.sealed, saved.log)) {
+        if (act.type === 'play') {
+          await api('POST', `/api/drills/${currentId}/play`, { steps: act.steps });
+        } else {
+          await api('POST', `/api/drills/${currentId}/seal`);
+        }
+      }
+      await refresh();
+    } catch (err2) {
+      tlStatus(`${failure ? '采集失败；' : ''}复原演练失败：${err2.message}，请检查服务状态后手动重置`, 'err');
+    }
+    collecting = false;
+    setControls();
+    renderTimeline();
   }
 }
 
@@ -245,6 +504,41 @@ $('#btn-deliver').addEventListener('click', async () => {
   } catch (err) {
     showError(err.message);
   }
+});
+
+// ---- 分歧时间轴事件 ----
+
+$('#btn-tl-collect').addEventListener('click', () => {
+  runCollection();
+});
+
+$('#btn-tl-cancel').addEventListener('click', () => {
+  collectGen += 1; // 旧采集在下一个检查点中止；复原仍会继续
+});
+
+// 重选副本或改动范围：作废旧采集并清空旧时间轴，旧请求不得覆盖新选择
+for (const sel of ['#tl-a', '#tl-b']) {
+  $(sel).addEventListener('change', () => {
+    collectGen += 1;
+    clearTimeline();
+    tlStatus('', '');
+  });
+}
+$('#tl-from').addEventListener('change', () => {
+  collectGen += 1;
+  clearTimeline();
+});
+$('#tl-to').addEventListener('input', () => {
+  rangeAuto = false;
+  collectGen += 1;
+  clearTimeline();
+});
+
+$('#tl-grid').addEventListener('click', (ev) => {
+  const td = ev.target.closest('td.tl-cell');
+  if (!td || !timeline) return;
+  selectedCell = { row: Number(td.dataset.row), tick: Number(td.dataset.tick) };
+  renderTimeline();
 });
 
 async function pollHealth() {

@@ -148,3 +148,41 @@ td.code, th.code { font-family: ui-monospace, Menlo, monospace; }
 .tag-duplicate { color: var(--muted); }
 .tag-waiting { color: var(--wait); }
 .tag-rejected { color: var(--bad); }
+
+/* 副本分歧时间轴 */
+.tl-controls {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 10px;
+  margin: 6px 0 10px; font-size: 12.5px; color: var(--muted);
+}
+.tl-controls label { display: flex; align-items: center; gap: 6px; }
+.tl-controls select, .tl-controls input {
+  background: var(--panel-2); color: var(--text);
+  border: 1px solid var(--line); border-radius: 7px; padding: 5px 8px;
+}
+.tl-controls input { width: 62px; }
+.tl-status {
+  margin: 6px 0; padding: 7px 10px; border-radius: 7px;
+  font-size: 12.5px; background: #14203a;
+  border: 1px solid var(--line); color: var(--text);
+}
+.tl-status.err { background: #3a1d24; border-color: #7f3543; color: #ffc4cc; }
+.tl-status.ok { background: #14342a; border-color: #2f6f57; color: #9ff0d2; }
+.tl-summary { font-size: 12.5px; color: var(--muted); margin: 4px 0 8px; }
+.tl-summary .tl-note { color: #5d6a83; }
+.tl-grid-wrap { max-height: 320px; }
+.tl-table th { text-align: center; }
+.tl-table th:first-child, .tl-table th:nth-child(2), .tl-table th:last-child { text-align: left; }
+.tl-cell {
+  text-align: center; cursor: pointer; color: #4d5a75;
+  min-width: 26px; user-select: none;
+}
+.tl-cell.tl-div { color: #ffb4b4; background: #4a2530; }
+.tl-cell.tl-conv { color: var(--ok); background: #17352b; }
+.tl-cell.tl-sel { outline: 2px solid var(--accent); outline-offset: -2px; }
+.tl-iv { color: var(--muted); font-size: 11.5px; white-space: nowrap; }
+.tl-details {
+  margin-top: 10px; border: 1px solid var(--line); border-radius: 8px;
+  padding: 10px 12px; background: var(--panel-2); font-size: 12.5px;
+}
+.tl-sides { display: flex; gap: 28px; margin: 4px 0 8px; }
+.tl-ev { padding: 2px 0; }

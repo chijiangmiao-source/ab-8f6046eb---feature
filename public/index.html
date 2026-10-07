@@ -57,9 +57,35 @@
           <tbody></tbody>
         </table>
       </div>
+
+      <h2>4. 副本分歧时间轴</h2>
+      <p class="hint">
+        选择两个副本与已回放步骤范围：页面自动重置并逐步回放采集投影（不超过 40 步），结束后复原演练原位。
+        按稳定步骤标识标出可见项 / 等待项 / 墓碑 / 已应用 / 首个拒因的首次分歧与收敛点；
+        投递顺序不同但投影相同不记为分歧。含重开后零散投递的演练无法自动复原，需先重置。
+      </p>
+      <div class="tl-controls">
+        <label>副本 A
+          <select id="tl-a"></select>
+        </label>
+        <label>副本 B
+          <select id="tl-b"></select>
+        </label>
+        <label>步骤范围
+          <input id="tl-from" type="number" min="1" max="40" value="1" />
+          –
+          <input id="tl-to" type="number" min="1" max="40" value="1" />
+        </label>
+        <button id="btn-tl-collect" class="primary" disabled>采集分歧时间轴</button>
+        <button id="btn-tl-cancel" disabled>取消</button>
+      </div>
+      <div id="tl-status" class="tl-status" hidden></div>
+      <div id="tl-summary" class="tl-summary"></div>
+      <div id="tl-grid" class="table-wrap tl-grid-wrap" hidden></div>
+      <div id="tl-details" class="tl-details" hidden></div>
     </section>
   </main>
 
-  <script src="/app.js"></script>
+  <script type="module" src="/app.js"></script>
 </body>
 </html>
